@@ -5,7 +5,7 @@ import { describe, expect, it } from '@op-engineering/op-test';
 // not enrolled and the prompt short-circuits with "Biometrics not available").
 // Leave `false` on physical devices — the Face ID / passcode prompt would
 // otherwise block the test suite waiting for user interaction.
-const RUN_BIOMETRIC_TESTS = true;
+const RUN_BIOMETRIC_TESTS = false;
 
 describe('securely storage/retrieve', () => {
   it('set/get', () => {
