@@ -6,14 +6,57 @@
 namespace ops2 {
 namespace jsi = facebook::jsi;
 
-std::function<void(const char *, const char *, bool)> _set;
-std::function<std::string(const char *, bool)> _get;
-std::function<void(const char *, bool)> _del;
+std::function<void(const char *, const char *, bool, BiometricPromptOptions)> _set;
+std::function<std::string(const char *, bool, BiometricPromptOptions)> _get;
+std::function<void(const char *, bool, BiometricPromptOptions)> _del;
 
-void install(jsi::Runtime &rt,
-             std::function<void(const char *, const char *, bool)> setFn,
-             std::function<std::string(const char *, bool)> getFn,
-             std::function<void(const char *, bool)> delFn) {
+static BiometricPromptOptions extractBiometricPromptOptions(jsi::Runtime &rt, const jsi::Object &params) {
+  BiometricPromptOptions options;
+  options.title = "Please authenticate";
+  options.subtitle = "";
+  options.negativeButtonText = "Cancel";
+  options.allowDeviceCredential = false;
+  options.allowBiometricWeak = false;
+
+  if (!params.hasProperty(rt, "biometricPrompt")) {
+    return options;
+  }
+
+  jsi::Value prop = params.getProperty(rt, "biometricPrompt");
+  if (prop.isNull() || prop.isUndefined() || !prop.isObject()) {
+    return options;
+  }
+
+  jsi::Object prompt = prop.asObject(rt);
+
+  auto getString = [&](const char *name, const std::string &fallback) -> std::string {
+    if (!prompt.hasProperty(rt, name)) return fallback;
+    jsi::Value v = prompt.getProperty(rt, name);
+    if (!v.isString()) return fallback;
+    return v.asString(rt).utf8(rt);
+  };
+
+  auto getBool = [&](const char *name, bool fallback) -> bool {
+    if (!prompt.hasProperty(rt, name)) return fallback;
+    jsi::Value v = prompt.getProperty(rt, name);
+    if (!v.isBool()) return fallback;
+    return v.getBool();
+  };
+
+  options.title = getString("title", options.title);
+  options.subtitle = getString("subtitle", options.subtitle);
+  options.negativeButtonText = getString("negativeButtonText", options.negativeButtonText);
+  options.allowDeviceCredential = getBool("allowDeviceCredential", options.allowDeviceCredential);
+  options.allowBiometricWeak = getBool("allowBiometricWeak", options.allowBiometricWeak);
+
+  return options;
+}
+
+void install(
+    jsi::Runtime &rt,
+    std::function<void(const char *, const char *, bool, BiometricPromptOptions)> setFn,
+    std::function<std::string(const char *, bool, BiometricPromptOptions)> getFn,
+    std::function<void(const char *, bool, BiometricPromptOptions)> delFn) {
 
   _set = setFn;
   _get = getFn;
@@ -58,8 +101,10 @@ void install(jsi::Runtime &rt,
       withBiometrics = params.getProperty(rt, "withBiometrics").asBool();
     }
 
+    BiometricPromptOptions promptOptions = extractBiometricPromptOptions(rt, params);
+
     try {
-      _set(key.c_str(), val.c_str(), withBiometrics);
+      _set(key.c_str(), val.c_str(), withBiometrics, promptOptions);
     } catch (std::exception &e) {
       auto errorStr = jsi::String::createFromUtf8(
           rt,
@@ -93,10 +138,12 @@ void install(jsi::Runtime &rt,
       withBiometrics = params.getProperty(rt, "withBiometrics").asBool();
     }
 
+    BiometricPromptOptions promptOptions = extractBiometricPromptOptions(rt, params);
+
     auto res = jsi::Object(rt);
 
     try {
-      auto val = _get(key.c_str(), withBiometrics);
+      auto val = _get(key.c_str(), withBiometrics, promptOptions);
       if (val.empty()) {
         res.setProperty(rt, "error", "[op-s2] Item not found");
       } else {
@@ -136,7 +183,9 @@ void install(jsi::Runtime &rt,
       withBiometrics = params.getProperty(rt, "withBiometrics").asBool();
     }
 
-    _del(key.c_str(), withBiometrics);
+    BiometricPromptOptions promptOptions = extractBiometricPromptOptions(rt, params);
+
+    _del(key.c_str(), withBiometrics, promptOptions);
 
     return {};
   });

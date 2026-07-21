@@ -78,9 +78,36 @@ export enum ACCESSIBILITY {
   WHEN_UNLOCKED_THIS_DEVICE_ONLY = 'AccessibleWhenUnlockedThisDeviceOnly',
 }
 
-export const get = proxy.get;
-export const set = proxy.set;
-export const del = proxy.del;
+interface BiometricPromptOptions {
+  /**
+   * Title shown on the biometric/device credential prompt.
+   */
+  title?: string;
+  /**
+   * Subtitle shown beneath the title on the biometric/device credential prompt.
+   * (iOS does not have a native subtitle field; when provided it is appended to the title.)
+   */
+  subtitle?: string;
+  /**
+   * Label of the negative (cancel) button.
+   */
+  negativeButtonText?: string;
+  /**
+   * Allow the device passcode (PIN/pattern/password) as an alternative to biometrics.
+   * Maps to:
+   * - iOS: `kSecAttrAccessControlDevicePasscode` and `LAPolicyDeviceOwnerAuthentication`
+   * - Android: `BiometricManager.Authenticators.DEVICE_CREDENTIAL`
+   * Defaults to `false`.
+   */
+  allowDeviceCredential?: boolean;
+  /**
+   * Allow Class 2 (weak) biometrics on Android (e.g. face/iris without strict hardware backing).
+   * On iOS this maps to `kSecAccessControlBiometryAny` instead of
+   * `kSecAccessControlBiometryCurrentSet` (less strict re-enrollment check).
+   * Defaults to `false` (strong biometrics only).
+   */
+  allowBiometricWeak?: boolean;
+}
 
 type SharedOperationErrors =
   | '[op-s2] User cancelled authentication'
@@ -107,17 +134,102 @@ type GetErrors =
   | 'Biometrics not available'
   | SharedOperationErrors;
 
-interface OPS2 {
-  set: (params: {
-    key: string;
-    value: string;
-    withBiometrics?: boolean;
-    accessibility?: ACCESSIBILITY;
-  }) => { error?: SetErrors };
-  get: (params: {
-    key: string;
-    withBiometrics?: boolean;
-    accessibility?: ACCESSIBILITY;
-  }) => { value: string | undefined; error?: GetErrors };
-  del: (params: { key: string; withBiometrics?: boolean }) => void;
+interface SetParams {
+  key: string;
+  value: string;
+  /**
+   * iOS only: the keychain accessibility class. Mutually exclusive with
+   * `withBiometrics` on iOS.
+   */
+  accessibility?: ACCESSIBILITY;
+  /**
+   * Require biometric (and/or device credential) authentication before
+   * reading or writing the value.
+   */
+  withBiometrics?: boolean;
+  /**
+   * Customize the biometric prompt and the accepted authenticators.
+   */
+  biometricPrompt?: BiometricPromptOptions;
 }
+
+interface GetParams {
+  key: string;
+  accessibility?: ACCESSIBILITY;
+  withBiometrics?: boolean;
+  biometricPrompt?: BiometricPromptOptions;
+}
+
+interface OPS2 {
+  set: (params: SetParams) => { error?: SetErrors };
+  get: (params: GetParams) => { value: string | undefined; error?: GetErrors };
+  del: (params: {
+    key: string;
+    withBiometrics?: boolean;
+    biometricPrompt?: BiometricPromptOptions;
+  }) => void;
+}
+
+// Map the string-based ACCESSIBILITY enum to the integer codes the iOS
+// keychain expects. Android ignores this value, so the translation is harmless
+// on that platform. Keeping the public enum as strings means existing
+// consumers don't need to change anything — we normalize internally before
+// hitting the native side.
+const ACCESSIBILITY_TO_INT: Record<string, number> = {
+  AccessibleWhenUnlocked: 0,
+  AccessibleAfterFirstUnlock: 1,
+  AccessibleAlways: 2,
+  AccessibleWhenPasscodeSetThisDeviceOnly: 3,
+  AccessibleAfterFirstUnlockThisDeviceOnly: 4,
+  AccessibleAlwaysThisDeviceOnly: 5,
+  AccessibleWhenUnlockedThisDeviceOnly: 6,
+};
+
+function normalizeAccessibility(
+  value: ACCESSIBILITY | undefined
+): number | undefined {
+  if (value === undefined) return undefined;
+  const mapped = ACCESSIBILITY_TO_INT[value as string];
+  return mapped ?? 1; // default to kSecAttrAccessibleAfterFirstUnlock
+}
+
+type NativeSetParams = {
+  key: string;
+  value: string;
+  accessibility?: number;
+  withBiometrics?: boolean;
+  biometricPrompt?: BiometricPromptOptions;
+};
+
+type NativeGetParams = {
+  key: string;
+  accessibility?: number;
+  withBiometrics?: boolean;
+  biometricPrompt?: BiometricPromptOptions;
+};
+
+function normalizeSetParams(params: SetParams): NativeSetParams {
+  return {
+    ...params,
+    accessibility: normalizeAccessibility(params.accessibility),
+  };
+}
+
+function normalizeGetParams(params: GetParams): NativeGetParams {
+  return {
+    ...params,
+    accessibility: normalizeAccessibility(params.accessibility),
+  };
+}
+
+export const set: OPS2['set'] = (params) =>
+  proxy.set(
+    normalizeSetParams(params) as unknown as Parameters<typeof proxy.set>[0]
+  );
+
+export const get: OPS2['get'] = (params) =>
+  proxy.get(
+    normalizeGetParams(params) as unknown as Parameters<typeof proxy.get>[0]
+  );
+
+export const del = proxy.del;

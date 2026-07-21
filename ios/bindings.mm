@@ -2,9 +2,18 @@
 #import "macros.h"
 #import <LocalAuthentication/LocalAuthentication.h>
 #import <Security/Security.h>
+#import <dispatch/dispatch.h>
 
 namespace ops2 {
 namespace jsi = facebook::jsi;
+
+struct BiometricPromptArgs {
+  std::string title;
+  std::string subtitle;
+  std::string negativeButtonText;
+  bool allowDeviceCredential;
+  bool allowBiometricWeak;
+};
 
 typedef enum {
   kBiometricsStateAvailable,
@@ -12,13 +21,102 @@ typedef enum {
   kBiometricsStateLocked
 } BiometricsState;
 
-BiometricsState getBiometricsState() {
+// MARK: - Memory Hygiene Helper
+static void zeroizeString(std::string &str) {
+  if (!str.empty()) {
+    memset(&str[0], 0, str.size());
+  }
+}
+
+static NSString *stringToNSString(const std::string &str) {
+  return [NSString stringWithUTF8String:str.c_str()];
+}
+
+static BiometricPromptArgs extractBiometricPromptArgs(jsi::Runtime &rt, const jsi::Object &params) {
+  BiometricPromptArgs args;
+  args.title = "Please authenticate";
+  args.subtitle = "";
+  args.negativeButtonText = "Cancel";
+  args.allowDeviceCredential = false;
+  args.allowBiometricWeak = false;
+
+  if (params.hasProperty(rt, "biometricPrompt")) {
+    jsi::Value prop = params.getProperty(rt, "biometricPrompt");
+    if (!prop.isNull() && !prop.isUndefined() && prop.isObject()) {
+      jsi::Object prompt = prop.asObject(rt);
+
+      // For `title` and `negativeButtonText`, the native side (Android
+      // BiometricPrompt in particular) requires a non-empty value. Treat an
+      // empty string the same as a missing property so we always fall back
+      // to a safe default.
+      auto getString = [&](const char *name, const std::string &fallback, bool allowEmpty = true) -> std::string {
+        if (!prompt.hasProperty(rt, name)) return fallback;
+        jsi::Value v = prompt.getProperty(rt, name);
+        if (!v.isString()) return fallback;
+        std::string s = v.asString(rt).utf8(rt);
+        if (!allowEmpty && s.empty()) return fallback;
+        return s;
+      };
+
+      auto getBool = [&](const char *name, bool fallback) -> bool {
+        if (!prompt.hasProperty(rt, name)) return fallback;
+        jsi::Value v = prompt.getProperty(rt, name);
+        if (!v.isBool()) return fallback;
+        return v.getBool();
+      };
+
+      args.title = getString("title", args.title, /*allowEmpty=*/false);
+      args.subtitle = getString("subtitle", args.subtitle, /*allowEmpty=*/true);
+      args.negativeButtonText = getString("negativeButtonText", args.negativeButtonText, /*allowEmpty=*/false);
+      args.allowDeviceCredential = getBool("allowDeviceCredential", args.allowDeviceCredential);
+      args.allowBiometricWeak = getBool("allowBiometricWeak", args.allowBiometricWeak);
+    }
+  }
+
+  return args;
+}
+
+// MARK: - LAContext Factory
+static LAContext *createLAContext(const BiometricPromptArgs &args) {
+  LAContext *context = [[LAContext alloc] init];
+
+  // iOS does not expose a native subtitle field on the LAContext prompt.
+  // When the caller provides one, append it to the localizedReason so the user still sees it.
+  std::string reason = args.title;
+  if (!args.subtitle.empty()) {
+    reason += "\n";
+    reason += args.subtitle;
+  }
+  NSString *localizedReason = stringToNSString(reason);
+  if (localizedReason.length > 0) {
+    context.localizedReason = localizedReason;
+  }
+
+  NSString *cancel = stringToNSString(args.negativeButtonText);
+  if (cancel.length > 0) {
+    context.localizedCancelTitle = cancel;
+  }
+
+  // Hide the fallback button if device credential fallback is not allowed
+  if (!args.allowDeviceCredential) {
+    context.localizedFallbackTitle = @"";
+  }
+
+  return context;
+}
+
+BiometricsState getBiometricsState(bool allowDeviceCredential) {
   LAContext *myContext = [[LAContext alloc] init];
   NSError *authError = nil;
 
-  if ([myContext
-          canEvaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
-                      error:&authError]) {
+  // When the caller accepts the device passcode as a fallback, switch to the
+  // "biometrics OR passcode" policy so users without enrolled biometrics can
+  // still authenticate via the keychain.
+  LAPolicy policy = allowDeviceCredential
+      ? LAPolicyDeviceOwnerAuthentication
+      : LAPolicyDeviceOwnerAuthenticationWithBiometrics;
+
+  if ([myContext canEvaluatePolicy:policy error:&authError]) {
     return kBiometricsStateAvailable;
   } else {
     if (authError.code == LAErrorBiometryLockout) {
@@ -29,59 +127,75 @@ BiometricsState getBiometricsState() {
   }
 }
 
-SecAccessControlRef getBioSecAccessControl() {
+SecAccessControlRef createBioSecAccessControl(bool allowDeviceCredential, bool allowBiometricWeak) {
+  // `kSecAccessControlBiometryAny` matches any enrolled biometric (looser — closer to Android
+  // Class 2 / WEAK). `kSecAccessControlBiometryCurrentSet` requires the current set of
+  // enrolled biometrics (tighter — closer to Android Class 3 / STRONG).
+  SecAccessControlCreateFlags biometryFlag = allowBiometricWeak
+      ? kSecAccessControlBiometryAny
+      : kSecAccessControlBiometryCurrentSet;
+
+  SecAccessControlCreateFlags flags = allowDeviceCredential
+      ? (biometryFlag | kSecAccessControlOr | kSecAccessControlDevicePasscode)
+      : biometryFlag;
+
   return SecAccessControlCreateWithFlags(
-      kCFAllocatorDefault,                             // default allocator
-      kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly, // Require passcode to be
-                                                       // set on device
-      kSecAccessControlUserPresence, // checks for user presence with touchID,
-                                     // faceID or passcode :)
-      nil);                          // Error pointer
+      kCFAllocatorDefault,
+      kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
+      flags,
+      nil);
 }
 
 NSMutableDictionary *get_base_entry_dict(std::string key) {
   NSMutableDictionary *queryDictionary = [[NSMutableDictionary alloc] init];
-  [queryDictionary setObject:(id)kSecClassGenericPassword forKey:(id)kSecClass];
+  [queryDictionary setObject:(__bridge id)kSecClassGenericPassword forKey:(__bridge id)kSecClass];
 
-  NSData *encodedIdentifier = [NSData dataWithBytes:key.data()
-                                             length:key.length()];
-  [queryDictionary setObject:encodedIdentifier forKey:(id)kSecAttrGeneric];
-  [queryDictionary setObject:encodedIdentifier forKey:(id)kSecAttrAccount];
-
-  [queryDictionary setObject:[[NSBundle mainBundle] bundleIdentifier]
-                      forKey:(id)kSecAttrService];
+  NSData *encodedIdentifier = [NSData dataWithBytes:key.data() length:key.length()];
+  [queryDictionary setObject:encodedIdentifier forKey:(__bridge id)kSecAttrGeneric];
+  [queryDictionary setObject:encodedIdentifier forKey:(__bridge id)kSecAttrAccount];
+  [queryDictionary setObject:[[NSBundle mainBundle] bundleIdentifier] forKey:(__bridge id)kSecAttrService];
 
   return queryDictionary;
 }
 
 CFStringRef getAccessibilityValue(int accessibility) {
   switch (accessibility) {
-  case 0:
-    return kSecAttrAccessibleWhenUnlocked;
-  case 1:
-    return kSecAttrAccessibleAfterFirstUnlock;
-  case 2:
-    return kSecAttrAccessibleAlways;
-  case 3:
-    return kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly;
-  case 4:
-    return kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
-  case 5:
-    return kSecAttrAccessibleAlwaysThisDeviceOnly;
-  default:
-    return kSecAttrAccessibleAfterFirstUnlock;
+    case 0: return kSecAttrAccessibleWhenUnlocked;
+    case 1: return kSecAttrAccessibleAfterFirstUnlock;
+    case 2: return kSecAttrAccessibleAlways;
+    case 3: return kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly;
+    case 4: return kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
+    case 5: return kSecAttrAccessibleAlwaysThisDeviceOnly;
+    case 6: return kSecAttrAccessibleWhenUnlockedThisDeviceOnly;
+    default: return kSecAttrAccessibleAfterFirstUnlock;
   }
-
-  return kSecAttrAccessibleAfterFirstUnlock;
 }
 
+// Robust deletion that removes both local and iCloud-synced items.
+// When `withBiometrics` is false we tell the keychain NOT to surface any
+// authentication UI — otherwise deleting an entry that was previously stored
+// with biometric protection would pop the Face ID / passcode prompt even
+// though the caller explicitly opted out of biometrics.
 void _delete(std::string &key, bool withBiometrics) {
   NSMutableDictionary *dict = get_base_entry_dict(key);
-  if (withBiometrics) {
-    [dict setObject:(__bridge id)getBioSecAccessControl()
-             forKey:(id)kSecAttrAccessControl];
+  [dict setObject:(__bridge id)kSecAttrSynchronizableAny forKey:(__bridge id)kSecAttrSynchronizable];
+  if (!withBiometrics) {
+    [dict setObject:(__bridge id)kSecUseAuthenticationUIFail forKey:(__bridge id)kSecUseAuthenticationUI];
   }
-  SecItemDelete((CFDictionaryRef)dict);
+  SecItemDelete((__bridge CFDictionaryRef)dict);
+}
+
+// Thread-safe dispatch for Keychain APIs that present authentication UI
+static OSStatus performCopyMatching(CFDictionaryRef query, CFTypeRef *result) {
+  if ([NSThread isMainThread]) {
+    return SecItemCopyMatching(query, result);
+  }
+
+  __block OSStatus status;
+  dispatch_sync(dispatch_get_main_queue(), ^{
+    status = SecItemCopyMatching(query, result);
+  });
+  return status;
 }
 
 std::string getSecurityErrorMessage(OSStatus status) {
@@ -113,31 +227,20 @@ void setSecurityError(jsi::Runtime &rt, jsi::Object &res, OSStatus status) {
   }
 }
 
-void install(jsi::Runtime &rt,
-             std::shared_ptr<react::CallInvoker> jsCallInvoker) {
+void install(jsi::Runtime &rt, std::shared_ptr<react::CallInvoker> jsCallInvoker) {
+
   auto set = HOSTFN("set", 1) {
     auto res = jsi::Object(rt);
-    CFStringRef accessibility = kSecAttrAccessibleAfterFirstUnlock;
 
-    if (count < 1) {
-      res.setProperty(rt, "error", "Params object is missing");
-      return res;
-    }
-
-    if (!args[0].isObject()) {
-      res.setProperty(rt, "error", "Params is not an object");
+    if (count < 1 || !args[0].isObject()) {
+      res.setProperty(rt, "error", "Params must be an object");
       return res;
     }
 
     jsi::Object params = args[0].asObject(rt);
 
-    if (!params.hasProperty(rt, "key")) {
-      res.setProperty(rt, "error", "Key property is missing");
-      return res;
-    }
-
-    if (!params.hasProperty(rt, "value")) {
-      res.setProperty(rt, "error", "Value property is missing");
+    if (!params.hasProperty(rt, "key") || !params.hasProperty(rt, "value")) {
+      res.setProperty(rt, "error", "Key or Value property is missing");
       return res;
     }
 
@@ -149,36 +252,54 @@ void install(jsi::Runtime &rt,
     std::string key = params.getProperty(rt, "key").asString(rt).utf8(rt);
     std::string val = params.getProperty(rt, "value").asString(rt).utf8(rt);
 
-    if (params.hasProperty(rt, "accessibility")) {
-      if (params.getProperty(rt, "accessibility").isNumber()) {
-        accessibility = getAccessibilityValue(static_cast<int>(
-            params.getProperty(rt, "accessibility").asNumber()));
-      }
+    CFStringRef accessibility = kSecAttrAccessibleAfterFirstUnlock;
+    if (params.hasProperty(rt, "accessibility") && params.getProperty(rt, "accessibility").isNumber()) {
+      accessibility = getAccessibilityValue(static_cast<int>(params.getProperty(rt, "accessibility").asNumber()));
     }
 
     bool withBiometrics = false;
-
     if (params.hasProperty(rt, "withBiometrics")) {
       withBiometrics = params.getProperty(rt, "withBiometrics").asBool();
     }
 
+    BiometricPromptArgs promptArgs = extractBiometricPromptArgs(rt, params);
+
+    if (withBiometrics) {
+      BiometricsState biometricsState = getBiometricsState(promptArgs.allowDeviceCredential);
+      if (biometricsState == kBiometricsStateNotAvailable) {
+        auto errorStr = jsi::String::createFromUtf8(rt, "Biometrics not available");
+        res.setProperty(rt, "error", errorStr);
+        return res;
+      }
+    }
+
+    // Delete prior entries (both local and synced) to prevent errSecDuplicateItem
     _delete(key, withBiometrics);
 
     NSMutableDictionary *dict = get_base_entry_dict(key);
 
-    // kSecAttrAccessControl is mutually excluse with kSecAttrAccessible
-    // https://mobile-security.gitbook.io/mobile-security-testing-guide/ios-testing-guide/0x06f-testing-local-authentication
     if (withBiometrics) {
-      [dict setObject:(__bridge_transfer id)getBioSecAccessControl()
-               forKey:(id)kSecAttrAccessControl];
+      SecAccessControlRef accessControl = createBioSecAccessControl(promptArgs.allowDeviceCredential, promptArgs.allowBiometricWeak);
+      if (accessControl) {
+        [dict setObject:(__bridge_transfer id)accessControl forKey:(__bridge id)kSecAttrAccessControl];
+      }
+      [dict setObject:createLAContext(promptArgs) forKey:(__bridge id)kSecUseAuthenticationContext];
+
+      NSString *promptTitle = stringToNSString(promptArgs.title);
+      if (promptTitle.length > 0) {
+        [dict setObject:promptTitle forKey:(__bridge id)kSecUseOperationPrompt];
+      }
     } else {
-      [dict setObject:(__bridge id)accessibility forKey:(id)kSecAttrAccessible];
+      [dict setObject:(__bridge id)accessibility forKey:(__bridge id)kSecAttrAccessible];
     }
 
     NSData *data = [NSData dataWithBytes:val.data() length:val.length()];
-    [dict setObject:data forKey:(id)kSecValueData];
+    [dict setObject:data forKey:(__bridge id)kSecValueData];
 
-    OSStatus status = SecItemAdd((CFDictionaryRef)dict, NULL);
+    OSStatus status = SecItemAdd((__bridge CFDictionaryRef)dict, NULL);
+
+    // Zeroize sensitive memory from input parameter
+    zeroizeString(val);
 
     if (status != noErr) {
       setSecurityError(rt, res, status);
@@ -188,12 +309,8 @@ void install(jsi::Runtime &rt,
   });
 
   auto get = HOSTFN("get", 1) {
-    if (count < 1) {
-      throw jsi::JSError(rt, "Params object is missing");
-    }
-
-    if (!args[0].isObject()) {
-      throw jsi::JSError(rt, "Params must be an object with key and value");
+    if (count < 1 || !args[0].isObject()) {
+      throw jsi::JSError(rt, "Params must be an object with key");
     }
 
     jsi::Object params = args[0].asObject(rt);
@@ -205,65 +322,54 @@ void install(jsi::Runtime &rt,
     std::string key = params.getProperty(rt, "key").asString(rt).utf8(rt);
 
     bool withBiometrics = false;
-
     if (params.hasProperty(rt, "withBiometrics")) {
       withBiometrics = params.getProperty(rt, "withBiometrics").asBool();
     }
 
+    BiometricPromptArgs promptArgs = extractBiometricPromptArgs(rt, params);
+
     NSMutableDictionary *dict = get_base_entry_dict(key);
 
-    [dict setObject:(id)kSecMatchLimitOne forKey:(id)kSecMatchLimit];
-    [dict setObject:(id)kCFBooleanTrue forKey:(id)kSecReturnData];
+    [dict setObject:(__bridge id)kSecMatchLimitOne forKey:(__bridge id)kSecMatchLimit];
+    [dict setObject:(__bridge id)kCFBooleanTrue forKey:(__bridge id)kSecReturnData];
 
     auto res = jsi::Object(rt);
 
     if (withBiometrics) {
-      BiometricsState biometricsState = getBiometricsState();
-      LAContext *authContext = [[LAContext alloc] init];
+      BiometricsState biometricsState = getBiometricsState(promptArgs.allowDeviceCredential);
 
-      // If device has no passcode/faceID/touchID then wallet-core cannot read
-      // the value from memory
       if (biometricsState == kBiometricsStateNotAvailable) {
-        auto errorStr =
-            jsi::String::createFromUtf8(rt, "Biometrics not available");
-
+        auto errorStr = jsi::String::createFromUtf8(rt, "Biometrics not available");
         res.setProperty(rt, "error", errorStr);
-
         return res;
       }
 
-      if (biometricsState == kBiometricsStateLocked) {
+      // Create and attach the fully configured LAContext
+      [dict setObject:createLAContext(promptArgs) forKey:(__bridge id)kSecUseAuthenticationContext];
 
-        // TODO receiving a localized string might be necessary if this is
-        // happening on production
-        [authContext
-             evaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics
-            localizedReason:@"You need to unlock your device"
-                      reply:^(BOOL success, NSError *error) {
-                        if (!success) {
-                          // Edge case when device might locked out after too
-                          // many password attempts User has failed to
-                          // authenticate, but due to this being a callback
-                          // cannot interrupt upper lexical scope We should
-                          // somehow prompt/tell the user that it has failed to
-                          // authenticate and wallet could not be loaded
-                        }
-                      }];
+      NSString *promptTitle = stringToNSString(promptArgs.title);
+      if (promptTitle.length > 0) {
+        [dict setObject:promptTitle forKey:(__bridge id)kSecUseOperationPrompt];
       }
 
-      [dict setObject:(__bridge id)getBioSecAccessControl()
-               forKey:(id)kSecAttrAccessControl];
+      SecAccessControlRef accessControl = createBioSecAccessControl(promptArgs.allowDeviceCredential, promptArgs.allowBiometricWeak);
+      if (accessControl) {
+        [dict setObject:(__bridge_transfer id)accessControl forKey:(__bridge id)kSecAttrAccessControl];
+      }
     }
 
     CFDataRef dataResult = nil;
-    OSStatus status =
-        SecItemCopyMatching((CFDictionaryRef)dict, (CFTypeRef *)&dataResult);
+    // Execute copy matching on the Main Thread to ensure proper UI rendering for Face ID
+    OSStatus status = performCopyMatching((__bridge CFDictionaryRef)dict, (CFTypeRef *)&dataResult);
 
     if (status == noErr) {
-      NSData *result = (__bridge NSData *)dataResult;
-      NSString *returnString =
-          [[NSString alloc] initWithData:result encoding:NSUTF8StringEncoding];
-      res.setProperty(rt, "value", [returnString UTF8String]);
+      NSData *result = (__bridge_transfer NSData *)dataResult;
+      NSString *returnString = [[NSString alloc] initWithData:result encoding:NSUTF8StringEncoding];
+
+      std::string resultStr = [returnString UTF8String] ? [returnString UTF8String] : "";
+      res.setProperty(rt, "value", jsi::String::createFromUtf8(rt, resultStr));
+
+      zeroizeString(resultStr);
       return res;
     }
 
@@ -272,12 +378,8 @@ void install(jsi::Runtime &rt,
   });
 
   auto del = HOSTFN("delete", 1) {
-    if (count < 1) {
-      throw jsi::JSError(rt, "Params object is missing");
-    }
-
-    if (!args[0].isObject()) {
-      throw jsi::JSError(rt, "Params must be an object with key and value");
+    if (count < 1 || !args[0].isObject()) {
+      throw jsi::JSError(rt, "Params must be an object with key");
     }
 
     jsi::Object params = args[0].asObject(rt);
@@ -287,15 +389,13 @@ void install(jsi::Runtime &rt,
     }
 
     std::string key = params.getProperty(rt, "key").asString(rt).utf8(rt);
-
+    
     bool withBiometrics = false;
-
     if (params.hasProperty(rt, "withBiometrics")) {
       withBiometrics = params.getProperty(rt, "withBiometrics").asBool();
     }
-
+    
     _delete(key, withBiometrics);
-
     return {};
   });
 
@@ -307,4 +407,5 @@ void install(jsi::Runtime &rt,
 
   rt.global().setProperty(rt, "__OPS2Proxy", std::move(module));
 }
+
 } // namespace ops2

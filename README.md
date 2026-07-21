@@ -41,16 +41,31 @@ const { error } = set({
   accessibility: ACCESSIBILITY.WHEN_PASSCODE_SET_THIS_DEVICE_ONLY,
   // OR works for both iOS and Android
   withBiometrics: true,
+  // Optional — customize the biometric / device-credential prompt
+  biometricPrompt: {
+    title: 'Unlock to continue',
+    subtitle: 'Authenticate to access your data',
+    negativeButtonText: 'Cancel',
+    allowDeviceCredential: true,
+    allowBiometricWeak: false,
+  },
 });
 
 const { error, value } = get({
   key: 'myValue',
   withBiometrics: true,
+  biometricPrompt: {
+    title: 'Unlock to read',
+    allowDeviceCredential: true,
+  },
 });
 
 const { error } = del({
   key: 'myValue',
   withBiometrics: true,
+  biometricPrompt: {
+    title: 'Unlock to delete',
+  },
 });
 ```
 
@@ -71,6 +86,29 @@ On iOS you can specify an accessibility value which allows you to customize when
 ### With biometrics
 
 When using biometric info you need to include `NSFaceIDUsageDescription` in your info.plist, which will prompt the user for permission to use faceID.
+
+#### Customizing the prompt
+
+Pass a `biometricPrompt` object to `set` / `get` / `del` to customize the auth UI and choose which authenticators are accepted:
+
+| Field                   | Description                                                                                                                                                                                   | Default                 |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| `title`                 | Prompt title                                                                                                                                                                                  | `"Please authenticate"` |
+| `subtitle`              | Prompt subtitle. iOS has no native subtitle slot so it is appended to the title.                                                                                                              | `""`                    |
+| `negativeButtonText`    | Label of the negative (cancel) button. Omitted on Android when `allowDeviceCredential: true` because the device-credential button takes that slot on API < 30.                                | `"Cancel"`              |
+| `allowDeviceCredential` | Allow the device passcode (PIN/pattern/password) as an alternative to biometrics. On iOS adds `kSecAccessControlDevicePasscode`; on Android OR's in `DEVICE_CREDENTIAL`.                      | `false`                 |
+| `allowBiometricWeak`    | Allow Class 2 (weak) biometrics. On iOS uses `kSecAccessControlBiometryAny` instead of `kSecAccessControlBiometryCurrentSet`; on Android uses `BIOMETRIC_WEAK` instead of `BIOMETRIC_STRONG`. | `false`                 |
+
+The resulting Android authenticator combinations are:
+
+| `allowDeviceCredential` | `allowBiometricWeak` | Android `BiometricManager.Authenticators` |
+| ----------------------- | -------------------- | ----------------------------------------- |
+| `false`                 | `false`              | `BIOMETRIC_STRONG`                        |
+| `true`                  | `false`              | `BIOMETRIC_STRONG \| DEVICE_CREDENTIAL`   |
+| `false`                 | `true`               | `BIOMETRIC_WEAK`                          |
+| `true`                  | `true`               | `BIOMETRIC_WEAK \| DEVICE_CREDENTIAL`     |
+
+If you pass `withBiometrics: true` without a `biometricPrompt` object at all, the prompt falls back to the defaults listed above.
 
 ## Secure Enclave
 
