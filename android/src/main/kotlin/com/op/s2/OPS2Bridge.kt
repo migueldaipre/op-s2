@@ -34,14 +34,19 @@ class OPS2Bridge(reactContext: ReactApplicationContext) {
 
     val authenticators = buildAuthenticators(options)
 
+    // BiometricPrompt requires a non-empty title — fall back to a safe default
+    // if the caller passed an empty string (or one slipped through JNI).
+    val title = options.title.ifEmpty { "Please authenticate" }
+
     val promptBuilder = BiometricPrompt.PromptInfo.Builder()
-      .setTitle(options.title)
+      .setTitle(title)
       .setSubtitle(options.subtitle)
       .setAllowedAuthenticators(authenticators)
 
     // setNegativeButtonText is incompatible with DEVICE_CREDENTIAL on API < 30.
     // Only set it when the user supplied one and we are not relying on the device
-    // credential as the implicit "negative" button.
+    // credential as the implicit "negative" button. Also guard against an
+    // empty string — BiometricPrompt throws if you call it with "".
     if (options.negativeButtonText.isNotEmpty() && !options.allowDeviceCredential) {
       promptBuilder.setNegativeButtonText(options.negativeButtonText)
     }
