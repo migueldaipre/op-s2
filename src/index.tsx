@@ -182,6 +182,7 @@ const ACCESSIBILITY_TO_INT: Record<string, number> = {
   AccessibleWhenPasscodeSetThisDeviceOnly: 3,
   AccessibleAfterFirstUnlockThisDeviceOnly: 4,
   AccessibleAlwaysThisDeviceOnly: 5,
+  AccessibleWhenUnlockedThisDeviceOnly: 6,
 };
 
 function normalizeAccessibility(
