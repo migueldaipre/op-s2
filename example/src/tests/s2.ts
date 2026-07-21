@@ -5,7 +5,7 @@ import { describe, expect, it } from '@op-engineering/op-test';
 // not enrolled and the prompt short-circuits with "Biometrics not available").
 // Leave `false` on physical devices — the Face ID / passcode prompt would
 // otherwise block the test suite waiting for user interaction.
-const RUN_BIOMETRIC_TESTS = false;
+const RUN_BIOMETRIC_TESTS = true;
 
 describe('securely storage/retrieve', () => {
   it('set/get', () => {
@@ -122,6 +122,60 @@ describe('accessibility option (iOS)', () => {
       key,
       value: 'myValue',
       accessibility: ACCESSIBILITY.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
+    });
+
+    expect(setError).toBe(undefined);
+
+    const { value, error } = get({ key });
+    expect(error).toBe(undefined);
+    expect(value).toEqual('myValue');
+
+    del({ key });
+  });
+
+  it('set/get with WHEN_UNLOCKED_THIS_DEVICE_ONLY accessibility (covers int code 6)', () => {
+    const key = 'key_unlocked_this_device_only';
+
+    const { error: setError } = set({
+      key,
+      value: 'myValue',
+      accessibility: ACCESSIBILITY.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+    });
+
+    expect(setError).toBe(undefined);
+
+    const { value, error } = get({ key });
+    expect(error).toBe(undefined);
+    expect(value).toEqual('myValue');
+
+    del({ key });
+  });
+
+  it('set/get with ALWAYS accessibility', () => {
+    const key = 'key_always';
+
+    const { error: setError } = set({
+      key,
+      value: 'myValue',
+      accessibility: ACCESSIBILITY.ALWAYS,
+    });
+
+    expect(setError).toBe(undefined);
+
+    const { value, error } = get({ key });
+    expect(error).toBe(undefined);
+    expect(value).toEqual('myValue');
+
+    del({ key });
+  });
+
+  it('set/get with ALWAYS_THIS_DEVICE_ONLY accessibility', () => {
+    const key = 'key_always_this_device_only';
+
+    const { error: setError } = set({
+      key,
+      value: 'myValue',
+      accessibility: ACCESSIBILITY.ALWAYS_THIS_DEVICE_ONLY,
     });
 
     expect(setError).toBe(undefined);
@@ -358,6 +412,40 @@ if (RUN_BIOMETRIC_TESTS) {
 
       expect(error).toBe(undefined);
       expect(value).toEqual('myValueNoPrompt');
+
+      del({ key });
+    });
+
+    it('set/get with empty title in biometricPrompt (falls back to default)', () => {
+      // Regression: an empty `title` would crash BiometricPrompt on Android
+      // because setTitle requires a non-empty CharSequence. The native layer
+      // must treat "" the same as a missing property.
+      const key = 'key_empty_title';
+
+      const { error: setError } = set({
+        key,
+        value: 'myValueEmptyTitle',
+        withBiometrics: true,
+        biometricPrompt: {
+          title: '',
+          negativeButtonText: '',
+          allowDeviceCredential: true,
+        },
+      });
+
+      expect(setError).toBe(undefined);
+
+      const { value, error } = get({
+        key,
+        withBiometrics: true,
+        biometricPrompt: {
+          title: '',
+          allowDeviceCredential: true,
+        },
+      });
+
+      expect(error).toBe(undefined);
+      expect(value).toEqual('myValueEmptyTitle');
 
       del({ key });
     });
