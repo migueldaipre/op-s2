@@ -15,32 +15,61 @@ class OPS2Bridge(reactContext: ReactApplicationContext) {
   private val cryptoManager = CryptoManager(reactContext)
   private external fun initialize(jsiPtr: Long)
 
-  fun setItem(key: String, value: String, withBiometrics: Boolean) {
-    if(withBiometrics) {
-      val activity = this.context.currentActivity
-      val executor: Executor = ContextCompat.getMainExecutor(this.context)
-      val promptInfo = BiometricPrompt.PromptInfo.Builder()
-        .setTitle("Please authenticate")
-        .setSubtitle("Biometric authentication is required to safely read/write data")
-        .setNegativeButtonText("Cancel")
-        .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
-        .build()
+  private fun buildAuthenticators(options: BiometricPromptOptions): Int {
+    var authenticators = 0
+    if (options.allowBiometricWeak) {
+      authenticators = authenticators or BiometricManager.Authenticators.BIOMETRIC_WEAK
+    } else {
+      authenticators = authenticators or BiometricManager.Authenticators.BIOMETRIC_STRONG
+    }
+    if (options.allowDeviceCredential) {
+      authenticators = authenticators or BiometricManager.Authenticators.DEVICE_CREDENTIAL
+    }
+    return authenticators
+  }
 
-      var mutex = Semaphore(0)
-      var authenticationCallback = TSSAuthenticationCallback(mutex)
+  private fun runBiometricPrompt(options: BiometricPromptOptions): TSSAuthenticationCallback {
+    val activity = this.context.currentActivity
+    val executor: Executor = ContextCompat.getMainExecutor(this.context)
 
-      activity?.runOnUiThread {
-        var biometricPrompt = BiometricPrompt(activity as AppCompatActivity, executor, authenticationCallback)
-        biometricPrompt.authenticate(promptInfo)
-      }
+    val authenticators = buildAuthenticators(options)
 
-      try {
-        mutex.acquire()
-      } catch (e: Exception) {
-        Log.e("BLAH", "Interrupted mutex exception");
-      }
+    val promptBuilder = BiometricPrompt.PromptInfo.Builder()
+      .setTitle(options.title)
+      .setSubtitle(options.subtitle)
+      .setAllowedAuthenticators(authenticators)
 
-      if(authenticationCallback.isAuthenticated) {
+    // setNegativeButtonText is incompatible with DEVICE_CREDENTIAL on API < 30.
+    // Only set it when the user supplied one and we are not relying on the device
+    // credential as the implicit "negative" button.
+    if (options.negativeButtonText.isNotEmpty() && !options.allowDeviceCredential) {
+      promptBuilder.setNegativeButtonText(options.negativeButtonText)
+    }
+
+    val promptInfo = promptBuilder.build()
+
+    val mutex = Semaphore(0)
+    val authenticationCallback = TSSAuthenticationCallback(mutex)
+
+    activity?.runOnUiThread {
+      val biometricPrompt = BiometricPrompt(activity as AppCompatActivity, executor, authenticationCallback)
+      biometricPrompt.authenticate(promptInfo)
+    }
+
+    try {
+      mutex.acquire()
+    } catch (e: Exception) {
+      Log.e("OPS2", "Interrupted mutex exception", e)
+    }
+
+    return authenticationCallback
+  }
+
+  fun setItem(key: String, value: String, withBiometrics: Boolean, options: BiometricPromptOptions) {
+    if (withBiometrics) {
+      val authenticationCallback = runBiometricPrompt(options)
+
+      if (authenticationCallback.isAuthenticated) {
         cryptoManager.set(key, value, true)
       } else {
         throw Exception(authenticationCallback.errorStr)
@@ -50,73 +79,25 @@ class OPS2Bridge(reactContext: ReactApplicationContext) {
     }
   }
 
-  fun getItem(key: String, withBiometrics: Boolean): String? {
+  fun getItem(key: String, withBiometrics: Boolean, options: BiometricPromptOptions): String? {
+    if (withBiometrics) {
+      val authenticationCallback = runBiometricPrompt(options)
 
-    if(withBiometrics) {
-      val activity = this.context.currentActivity
-      val executor: Executor = ContextCompat.getMainExecutor(this.context)
-      val promptInfo = BiometricPrompt.PromptInfo.Builder()
-        .setTitle("Please authenticate")
-        .setSubtitle("Biometric authentication is required to safely read/write data")
-        .setNegativeButtonText("Cancel")
-        .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
-        .build()
-
-      var mutex = Semaphore(0)
-      var authenticationCallback = TSSAuthenticationCallback(mutex)
-
-      activity?.runOnUiThread {
-
-        var biometricPrompt = BiometricPrompt(activity as AppCompatActivity, executor, authenticationCallback)
-        biometricPrompt.authenticate(promptInfo)
-      }
-
-      try {
-        mutex.acquire()
-      } catch (e: Exception) {
-      }
-
-      if(authenticationCallback.isAuthenticated) {
-        val value = cryptoManager.get(key, true)
-        return value;
+      if (authenticationCallback.isAuthenticated) {
+        return cryptoManager.get(key, true)
       } else {
         throw Exception(authenticationCallback.errorStr)
       }
-
     } else {
       return cryptoManager.get(key)
     }
-
-    return null
   }
 
-  fun deleteItem(key: String, withBiometrics: Boolean) {
+  fun deleteItem(key: String, withBiometrics: Boolean, options: BiometricPromptOptions) {
+    if (withBiometrics) {
+      val authenticationCallback = runBiometricPrompt(options)
 
-    if(withBiometrics) {
-      val activity = this.context.currentActivity
-      val executor: Executor = ContextCompat.getMainExecutor(this.context)
-      val promptInfo = BiometricPrompt.PromptInfo.Builder()
-        .setTitle("Please authenticate")
-        .setSubtitle("Biometric authentication is required to safely read/write data")
-        .setNegativeButtonText("Cancel")
-        .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
-        .build()
-
-      var mutex = Semaphore(0)
-      var authenticationCallback = TSSAuthenticationCallback(mutex)
-
-      activity?.runOnUiThread {
-        var biometricPrompt = BiometricPrompt(activity as AppCompatActivity, executor, authenticationCallback)
-        biometricPrompt.authenticate(promptInfo)
-      }
-
-      try {
-        mutex.acquire()
-      } catch (e: Exception) {
-
-      }
-
-      if(authenticationCallback.isAuthenticated) {
+      if (authenticationCallback.isAuthenticated) {
         cryptoManager.delete(key, true)
       } else {
         throw Exception(authenticationCallback.errorStr)

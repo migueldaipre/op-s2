@@ -97,23 +97,55 @@ JNIEnv *GetJniEnv()
 
 jstring string2jstring(JNIEnv *env, const char *str)
 {
+    if (str == nullptr) {
+        return env->NewStringUTF("");
+    }
     return (*env).NewStringUTF(str);
 }
 
-void set(const char* key, const char* value, bool withBiometrics)
+jobject buildBiometricPromptOptions(JNIEnv *env, const ops2::BiometricPromptOptions &options)
+{
+    jclass optsClass = env->FindClass("com/op/s2/BiometricPromptOptions");
+    if (optsClass == nullptr) {
+        env->ExceptionClear();
+        return nullptr;
+    }
+
+    jmethodID optsCtor = env->GetMethodID(
+        optsClass,
+        "<init>",
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZZ)V"
+    );
+    if (optsCtor == nullptr) {
+        env->ExceptionClear();
+        return nullptr;
+    }
+
+    jstring jTitle = string2jstring(env, options.title.c_str());
+    jstring jSubtitle = string2jstring(env, options.subtitle.c_str());
+    jstring jNegative = string2jstring(env, options.negativeButtonText.c_str());
+
+    return env->NewObject(
+        optsClass,
+        optsCtor,
+        jTitle,
+        jSubtitle,
+        jNegative,
+        (jboolean)options.allowDeviceCredential,
+        (jboolean)options.allowBiometricWeak
+    );
+}
+
+void set(const char* key, const char* value, bool withBiometrics, ops2::BiometricPromptOptions options)
 {
     JNIEnv *jniEnv = GetJniEnv();
     java_class = jniEnv->GetObjectClass(java_object);
-    jmethodID mid = jniEnv->GetMethodID(java_class, "setItem", "(Ljava/lang/String;Ljava/lang/String;Z)V");
+    jmethodID mid = jniEnv->GetMethodID(java_class, "setItem", "(Ljava/lang/String;Ljava/lang/String;ZLcom/op/s2/BiometricPromptOptions;)V");
     jstring jKey = string2jstring(jniEnv, key);
     jstring jVal = string2jstring(jniEnv, value);
-    jvalue params[3];
-    params[0].l = jKey;
-    params[1].l = jVal;
-    params[2].z = withBiometrics;
+    jobject jOpts = buildBiometricPromptOptions(jniEnv, options);
 
-
-    jniEnv->CallVoidMethodA(java_object, mid, params);
+    jniEnv->CallVoidMethod(java_object, mid, jKey, jVal, withBiometrics, jOpts);
 
     jthrowable exObj = jniEnv->ExceptionOccurred();
     if(exObj) {
@@ -127,21 +159,18 @@ void set(const char* key, const char* value, bool withBiometrics)
         const char *mstr = jniEnv->GetStringUTFChars(message, NULL);
         throw std::runtime_error(std::string(mstr));
     }
-
 }
 
-std::string get(const char* key, bool withBiometrics)
+std::string get(const char* key, bool withBiometrics, ops2::BiometricPromptOptions options)
 {
     JNIEnv *jniEnv = GetJniEnv();
     java_class = jniEnv->GetObjectClass(java_object);
-    jmethodID mid = jniEnv->GetMethodID(java_class, "getItem", "(Ljava/lang/String;Z)Ljava/lang/String;");
+    jmethodID mid = jniEnv->GetMethodID(java_class, "getItem", "(Ljava/lang/String;ZLcom/op/s2/BiometricPromptOptions;)Ljava/lang/String;");
     jstring jKey = string2jstring(jniEnv, key);
-    jvalue params[3];
-    params[0].l = jKey;
-    params[1].z = withBiometrics;
+    jobject jOpts = buildBiometricPromptOptions(jniEnv, options);
 
+    jstring result = (jstring)jniEnv->CallObjectMethod(java_object, mid, jKey, withBiometrics, jOpts);
 
-    jstring result = (jstring)jniEnv->CallObjectMethodA(java_object, mid, params);
     jthrowable exObj = jniEnv->ExceptionOccurred();
     if(exObj) {
         jniEnv->ExceptionClear();
@@ -165,17 +194,15 @@ std::string get(const char* key, bool withBiometrics)
     return str;
 }
 
-void del(const char* key, bool withBiometrics)
+void del(const char* key, bool withBiometrics, ops2::BiometricPromptOptions options)
 {
     JNIEnv *jniEnv = GetJniEnv();
     java_class = jniEnv->GetObjectClass(java_object);
-    jmethodID mid = jniEnv->GetMethodID(java_class, "deleteItem", "(Ljava/lang/String;Z)V");
+    jmethodID mid = jniEnv->GetMethodID(java_class, "deleteItem", "(Ljava/lang/String;ZLcom/op/s2/BiometricPromptOptions;)V");
     jstring jKey = string2jstring(jniEnv, key);
-    jvalue params[2];
-    params[0].l = jKey;
-    params[1].z = withBiometrics;
+    jobject jOpts = buildBiometricPromptOptions(jniEnv, options);
 
-    jniEnv->CallVoidMethodA(java_object, mid, params);
+    jniEnv->CallVoidMethod(java_object, mid, jKey, withBiometrics, jOpts);
 }
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *jvm, void *reserved)
