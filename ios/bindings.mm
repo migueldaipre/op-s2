@@ -45,11 +45,17 @@ static BiometricPromptArgs extractBiometricPromptArgs(jsi::Runtime &rt, const js
     if (!prop.isNull() && !prop.isUndefined() && prop.isObject()) {
       jsi::Object prompt = prop.asObject(rt);
 
-      auto getString = [&](const char *name, const std::string &fallback) -> std::string {
+      // For `title` and `negativeButtonText`, the native side (Android
+      // BiometricPrompt in particular) requires a non-empty value. Treat an
+      // empty string the same as a missing property so we always fall back
+      // to a safe default.
+      auto getString = [&](const char *name, const std::string &fallback, bool allowEmpty = true) -> std::string {
         if (!prompt.hasProperty(rt, name)) return fallback;
         jsi::Value v = prompt.getProperty(rt, name);
         if (!v.isString()) return fallback;
-        return v.asString(rt).utf8(rt);
+        std::string s = v.asString(rt).utf8(rt);
+        if (!allowEmpty && s.empty()) return fallback;
+        return s;
       };
 
       auto getBool = [&](const char *name, bool fallback) -> bool {
@@ -59,9 +65,9 @@ static BiometricPromptArgs extractBiometricPromptArgs(jsi::Runtime &rt, const js
         return v.getBool();
       };
 
-      args.title = getString("title", args.title);
-      args.subtitle = getString("subtitle", args.subtitle);
-      args.negativeButtonText = getString("negativeButtonText", args.negativeButtonText);
+      args.title = getString("title", args.title, /*allowEmpty=*/false);
+      args.subtitle = getString("subtitle", args.subtitle, /*allowEmpty=*/true);
+      args.negativeButtonText = getString("negativeButtonText", args.negativeButtonText, /*allowEmpty=*/false);
       args.allowDeviceCredential = getBool("allowDeviceCredential", args.allowDeviceCredential);
       args.allowBiometricWeak = getBool("allowBiometricWeak", args.allowBiometricWeak);
     }
@@ -160,6 +166,7 @@ CFStringRef getAccessibilityValue(int accessibility) {
     case 3: return kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly;
     case 4: return kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
     case 5: return kSecAttrAccessibleAlwaysThisDeviceOnly;
+    case 6: return kSecAttrAccessibleWhenUnlockedThisDeviceOnly;
     default: return kSecAttrAccessibleAfterFirstUnlock;
   }
 }
